@@ -14,7 +14,6 @@
 #include <boost/fiber/all.hpp>
 #include <boost/lockfree/queue.hpp>
 
-#define WORKER_MAX_WORKLOAD 128
 
 enum class api_type{
     RENT,
@@ -93,6 +92,7 @@ private:
     std::string stdcode_filename;   // 법정동코드(binary) 파일 이름
 
     int num_workers;
+    int worker_max_workload;
     worker_context* worker_ctx;
 
     std::atomic<bool> submit_done;  // queue에 더는 푸시할 메세지가 없으며 queue가 비어있음
