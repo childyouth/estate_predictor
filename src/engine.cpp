@@ -5,9 +5,6 @@ namespace asio = boost::asio;
 namespace beast = boost::beast;
 namespace http = beast::http;
 
-std::string API_RENT_KEY;
-std::string API_TRADE_KEY;
-
 // Mutex for thread-safe output
 std::mutex output_mutex;
 
@@ -34,6 +31,8 @@ void engine::allocate_work(){
         std::cout << "[";
     }
     for (int i = 0;i<lawd_cd_list_len;i++){
+        std::filesystem::path lawd_path = std::to_string(lawd_cd_list[i]);
+        std::filesystem::create_directories(savepath / lawd_path);
         allocate_task(lawd_cd_list[i]);
         if(i % (lawd_cd_list_len / 20) == 0){
             std::lock_guard<std::mutex> lock(output_mutex);
@@ -57,6 +56,7 @@ void engine::init_worker_ctx(int id){
     worker_ctx[id].is_done = false;
     worker_ctx[id].num_working_tasks = 0;
     worker_ctx[id].num_finished_tasks = 0;
+    worker_ctx[id].num_noitem_tasks = 0;
     worker_ctx[id].num_failed_tasks = 0;
     worker_ctx[id].error_tasks.clear();
 }
@@ -86,9 +86,105 @@ bool engine::is_worker_working(int thread_id){
     return is_worker_working(&worker_ctx[thread_id]);
 }
 
-boost::asio::awaitable<void> engine::handle_api_msg(api_msg *msg, worker_context *worker_ctx)
+boost::asio::awaitable<void> engine::handle_api_msg(asio::io_context& io_context, worker_context *worker_ctx, api_msg *msg)
 {
-    co_await asio::steady_timer(co_await asio::this_coro::executor, std::chrono::milliseconds(1)).async_wait(asio::use_awaitable);
+    asio::ip::tcp::resolver resolver(io_context);
+    beast::tcp_stream tcp_stream(io_context);
+    
+    auto lawd_cd = std::to_string(msg->lawd_cd);
+    auto deal_ymd = std::to_string(msg->deal_ymd);
+    int api_id = (int)msg->api;
+
+    // std::tuple<std::string, std::string, std::string> api = api_info.api_addr_and_key[(int)msg->api];
+    auto [host, endpoint, key] = api_info.api_addr_and_key[api_id];
+
+
+    std::string query = endpoint + "?serviceKey=" + key +
+    "&LAWD_CD=" + lawd_cd +
+    "&DEAL_YMD=" + deal_ymd +
+    "&numOfRows=" + std::to_string(num_of_rows);
+
+    auto resolved =  co_await resolver.async_resolve(host, "http", asio::use_awaitable);
+    co_await tcp_stream.async_connect(resolved, asio::use_awaitable);
+
+    std::string filename = (savepath/lawd_cd/(deal_ymd+"_api_"+std::to_string(api_id)+".csv")).string();
+    std::ofstream out(filename);
+    if (!out.is_open()) {
+        std::lock_guard<std::mutex> lock(output_mutex);
+        std::cout << "open failed. : " << filename << "\n";
+        worker_ctx->num_failed_tasks++;
+        worker_ctx->num_working_tasks--;
+        co_return;
+    }
+
+    for(int pageNo = 1, retry = 0;;){
+        if(retry >= max_retry){
+            worker_ctx->error_tasks.push_back(msg);
+            worker_ctx->num_failed_tasks++;
+            break;
+        }
+        beast::flat_buffer res_buffer;
+        http::response<http::string_body> res;
+
+        http::request<http::string_body> req{http::verb::get, (query + "&pageNo"+std::to_string(pageNo)), 11};
+        req.set(http::field::host, host);
+        req.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
+
+        // send request
+        co_await http::async_write(tcp_stream, req, asio::use_awaitable);
+        
+        // receive response
+        co_await http::async_read(tcp_stream,res_buffer,res, asio::use_awaitable);
+        
+        {
+            ptree pt;
+            std::istringstream xml_stream (res.body());
+            read_xml(xml_stream, pt);
+            
+            int resultCode = std::stoi(pt.get<std::string>("response.header.resultCode","-1").data());
+
+            // resultCode는 api 문서 기준 (000, 001 ... 031)
+            // 0 은 성공
+            if(resultCode == 0){
+                int totalCount = std::stoi(pt.get<std::string>("response.body.totalCount","0").data());
+                
+                // totalCount 없으면
+                if(totalCount == 0){
+                    break;
+                }
+
+                // 첫 수행이라면
+                if(pageNo == 1){
+                    out << api_info.api_columns[api_id];
+                }
+
+                for (auto& node : pt.get_child("response.body.items")){
+                    for(std::string column : api_info.api_column_items[api_id]){
+                        out << node.second.get<std::string>(column,"") << ",";
+                    }
+                    out << "\n";
+                }
+
+                // 페이지를 더 가져와야 한다면
+                if ((totalCount - num_of_rows * pageNo) > 0){
+                    retry=0;
+                    ++pageNo;
+                    continue;
+                }
+                else{
+                    break;
+                }
+            }
+            else{
+                retry++;
+                continue;
+            }
+        }
+    }
+
+    out.close();
+
+    // co_await asio::steady_timer(co_await asio::this_coro::executor, std::chrono::milliseconds(1)).async_wait(asio::use_awaitable);
     
     worker_ctx->num_working_tasks--;
     worker_ctx->num_finished_tasks++;
@@ -98,8 +194,8 @@ boost::asio::awaitable<void> engine::handle_api_msg(api_msg *msg, worker_context
 
 int engine::worker(int thread_id){
     worker_context* ctx = &worker_ctx[thread_id];
-
     asio::io_context io_context;
+    
     api_msg* msg = NULL;
 
     while(!ctx->is_done){
@@ -107,6 +203,9 @@ int engine::worker(int thread_id){
         if(is_worker_busy(ctx)){
             // 빈자리 생길 수 있도록 코루틴 수행
             io_context.run_one();
+            if(io_context.stopped()){
+                io_context.restart();
+            }
         }
         // worker가 여력이 있다면
         else{
@@ -114,7 +213,7 @@ int engine::worker(int thread_id){
             if(pull_task(msg)){
                 // 코루틴 생성
                 ctx->num_working_tasks++;
-                asio::co_spawn(io_context,handle_api_msg(msg,ctx),asio::detached);
+                asio::co_spawn(io_context,handle_api_msg(io_context, ctx, msg),asio::detached);
             }
             // msg queue가 비었으며 채워질 일이 없다면
             else if(submit_done){
@@ -241,19 +340,46 @@ ldcd_t* engine::parse_lawd_cd_list(){
     return ldcd_list;
 }
 
+std::vector<std::string> engine::tokenizer(std::string org_str, char delim){
+    std::vector<std::string> ret;
+    std::string token;
+    std::stringstream stream(org_str);
+    while(std::getline(stream,token,delim)){
+        ret.push_back(token);
+    }
+    return ret;
+}
+
 void engine::parse_api_info()
 {
-    std::string base_addr = ini_ptree.get<std::string>("api_addr.api_base_addr");
-    std::string rent_addr = ini_ptree.get<std::string>("api_addr.api_rent_endpoint");
-    std::string trade_addr = ini_ptree.get<std::string>("api_addr.api_trade_endpoint");
+    std::string base_addr = ini_ptree.get<std::string>("api_addr.api_base_addr", "https://apis.data.go.kr");
+    std::string rent_addr = ini_ptree.get<std::string>("api_addr.api_rent_endpoint", "/1613000/RTMSDataSvcAptRent/getRTMSDataSvcAptRent");
+    std::string trade_addr = ini_ptree.get<std::string>("api_addr.api_trade_endpoint", "/1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade");
     
-    std::string rent_key = ini_ptree.get<std::string>("key.api_rent_key");
-    std::string trade_key = ini_ptree.get<std::string>("key.api_trade_key");
+    std::string rent_key = ini_ptree.get<std::string>("key.api_rent_key","");
+    std::string trade_key = ini_ptree.get<std::string>("key.api_trade_key","");
+
+    assert(rent_key.size() > 0);
+    assert(trade_key.size() > 0);
 
     api_info.api_addr_and_key.resize((size_t)api_type::NUM_API_TYPE);
+    api_info.api_columns.resize((size_t)api_type::NUM_API_TYPE);
+    api_info.api_column_items.resize((size_t)api_type::NUM_API_TYPE);
+    int rent_id = (int)api_type::RENT;
+    int trade_id = (int)api_type::TRADE;
 
-    api_info.api_addr_and_key[(int)api_type::RENT] = std::tuple<std::string, std::string, std::string>(base_addr, rent_addr, rent_key);
-    api_info.api_addr_and_key[(int)api_type::TRADE] = std::tuple<std::string, std::string, std::string>(base_addr, trade_addr, trade_key);
+    api_info.api_addr_and_key[rent_id] = std::tuple<std::string, std::string, std::string>(base_addr, rent_addr, rent_key);
+    api_info.api_addr_and_key[trade_id] = std::tuple<std::string, std::string, std::string>(base_addr, trade_addr, trade_key);
+
+    api_info.api_columns[rent_id] = ini_ptree.get<std::string>("variable.api_rent_columns","");
+    api_info.api_columns[trade_id] = ini_ptree.get<std::string>("variable.api_trade_columns","");
+
+    api_info.api_column_items[rent_id]=tokenizer(api_info.api_columns[rent_id], ',');    
+    api_info.api_column_items[trade_id]=tokenizer(api_info.api_columns[trade_id],',');
+
+
+    num_of_rows = std::stoi(ini_ptree.get<std::string>("variable.num_of_rows", "1000"));
+    max_retry = std::stoi(ini_ptree.get<std::string>("variable.max_retry", "3"));
 
     std::cout << "BASE ADDR : " << base_addr << "\n";
     std::cout << "ENDPOINT(RENT) : " << rent_addr << "\n";
@@ -264,14 +390,15 @@ void engine::parse_api_info()
 
 void engine::parse_app_args()
 {
-    stdcode_filename = ini_ptree.get<std::string>("engine.stdcode_filename");
-    savename = ini_ptree.get<std::string>("engine.savename");
-    num_workers = std::stoi(ini_ptree.get<std::string>("engine.num_thread"));
-    worker_max_workload = std::stoi(ini_ptree.get<std::string>("engine.worker_max_workload"));
+    stdcode_filename = ini_ptree.get<std::string>("engine.stdcode_filename","./stdcode_only.bin");
+    savepath = ini_ptree.get<std::string>("engine.savepath", "./results/");
+    std::filesystem::create_directories(savepath);
+    num_workers = std::stoi(ini_ptree.get<std::string>("engine.num_thread", "8"));
+    worker_max_workload = std::stoi(ini_ptree.get<std::string>("engine.worker_max_workload", "128"));
 
     std::cout << std::string(40, '=') << "\n";
     std::cout << "STDCODE FILENAME : " << stdcode_filename << "\n";
-    std::cout << "SAVENAME : " << savename << "\n";
+    std::cout << "SAVEPATH : " << savepath << "\n";
     std::cout << "NUM THREAD : " << num_workers << "\n";
     std::cout << "WORKER MAX WORKLOAD : " << worker_max_workload << "\n";
     std::cout << std::string(40, '=') << "\n";
