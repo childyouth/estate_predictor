@@ -23,10 +23,14 @@ api_trade_endpoint = /1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade
 [variable]
 earliest_ymd = 201101
 latest_ymd = 202504
+num_of_rows = 1000
+max_retry = 3
+api_rent_columns = aptNm,buildYear,contractTerm,contractType,dealYear,dealMonth,dealDay,deposit,excluUseAr,floor,jibun,monthlyRent,preDeposit,preMonthlyRent,sggCd,umdNm,useRRRight,\n
+api_trade_columns = aptDong,aptNm,buildYear,buyerGbn,cdealDay,cdealType,dealAmount,dealDay,dealMonth,dealYear,dealingGbn,estateAgentSggNm,excluUseAr,floor,jibun,landLeaseholdGbn,rgstDate,sggCd,slerGbn,umdNm,\n
 
 [engine]
-worker_max_workload = 256
-num_thread = 8
-savename = 
+worker_max_workload = 128
+num_thread = 16
+savepath = ./results/
 stdcode_filename = ./stdcode_only.bin
 ```
