@@ -32,7 +32,9 @@
 *.app
 
 results/
+failed/
 build/
+*.log
 estate_parser.ini
 estate_parser
 thread_test.cpp

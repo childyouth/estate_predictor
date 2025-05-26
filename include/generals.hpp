@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <functional>
 #include <climits>
+#include <ctime>
+#include <csignal>
 #include <thread>
 
 using ym_t = unsigned int;
