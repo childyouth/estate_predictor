@@ -15,11 +15,19 @@ void engine::allocate_task(ldcd_t lawd_cd){
     #pragma omp parallel for
     for(int i = 0;i < year_month_list_len; i++){
         ym_t deal_ymd = year_month_list[i];
-        api_msg* rent_msg = new api_msg{api_type::RENT, lawd_cd, deal_ymd}; 
-        api_msg* trade_msg = new api_msg{api_type::TRADE, lawd_cd, deal_ymd};
-        
-        push_task(rent_msg);
-        push_task(trade_msg);
+        std::filesystem::path rent_filepath = savepath/std::to_string(lawd_cd)/(std::to_string(deal_ymd)+"_api_"+std::to_string((int)api_type::RENT)+".csv");
+        std::filesystem::path trade_filepath = savepath/std::to_string(lawd_cd)/(std::to_string(deal_ymd)+"_api_"+std::to_string((int)api_type::TRADE)+".csv");
+
+        if(!std::filesystem::exists(rent_filepath) || std::filesystem::is_empty(rent_filepath)){
+            api_msg* rent_msg = new api_msg{api_type::RENT, lawd_cd, deal_ymd}; 
+            push_task(rent_msg);
+            total_msgs++;
+        }
+        if(!std::filesystem::exists(trade_filepath) || std::filesystem::is_empty(trade_filepath)){
+            api_msg* trade_msg = new api_msg{api_type::TRADE, lawd_cd, deal_ymd};
+            push_task(trade_msg);
+            total_msgs++;
+        }
     }
 }
 
@@ -31,20 +39,18 @@ void engine::allocate_work(){
         std::cout << "[";
     }
     for (int i = 0;i<lawd_cd_list_len;i++){
-        std::filesystem::path lawd_path = std::to_string(lawd_cd_list[i]);
-        std::filesystem::create_directories(savepath / lawd_path);
         allocate_task(lawd_cd_list[i]);
-        if(i % (lawd_cd_list_len / 20) == 0){
+        if((i+1) % (lawd_cd_list_len / 20) == 0){
             std::lock_guard<std::mutex> lock(output_mutex);
-            std::cout << "|";
+            std::cout << "|" << std::flush;
         }
-    }
-    while(!api_msg_queue.empty()){
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     {
         std::lock_guard<std::mutex> lock(output_mutex);
-        std::cout << "|]" << "\n";
+        std::cout << "]" << "\n";
+    }
+    while(!api_msg_queue.empty()){
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     submit_done.store(true);
 
@@ -107,20 +113,16 @@ boost::asio::awaitable<void> engine::handle_api_msg(asio::io_context& io_context
     auto resolved =  co_await resolver.async_resolve(host, "http", asio::use_awaitable);
     co_await tcp_stream.async_connect(resolved, asio::use_awaitable);
 
-    std::string filename = (savepath/lawd_cd/(deal_ymd+"_api_"+std::to_string(api_id)+".csv")).string();
-    std::ofstream out(filename);
-    if (!out.is_open()) {
-        std::lock_guard<std::mutex> lock(output_mutex);
-        std::cout << "open failed. : " << filename << "\n";
-        worker_ctx->num_failed_tasks++;
-        worker_ctx->num_working_tasks--;
-        co_return;
-    }
-
+    std::filesystem::path filepath = savepath/lawd_cd/(deal_ymd+"_api_"+std::to_string(api_id)+".csv");
+    std::filesystem::path failed_file_path = failed_log_path/lawd_cd/(deal_ymd+"_api_"+std::to_string(api_id)+".csv");
+    std::ofstream out;
+    
+    bool should_msg_free = true;
     for(int pageNo = 1, retry = 0;;){
         if(retry >= max_retry){
             worker_ctx->error_tasks.push_back(msg);
             worker_ctx->num_failed_tasks++;
+            should_msg_free = false;
             break;
         }
         beast::flat_buffer res_buffer;
@@ -150,11 +152,23 @@ boost::asio::awaitable<void> engine::handle_api_msg(asio::io_context& io_context
                 
                 // totalCount 없으면
                 if(totalCount == 0){
+                    worker_ctx->num_noitem_tasks++;
+                    worker_ctx->noitem_tasks.push_back(msg);
+                    should_msg_free = false;
                     break;
                 }
 
                 // 첫 수행이라면
                 if(pageNo == 1){
+                    std::filesystem::create_directories(savepath / lawd_cd);
+                    out.open(filepath);
+                    if (!out.is_open()) {
+                        std::lock_guard<std::mutex> lock(output_mutex);
+                        std::cout << "open failed. : " << filepath.string() << "\n";
+                        worker_ctx->num_failed_tasks++;
+                        worker_ctx->num_working_tasks--;
+                        co_return;
+                    }
                     out << api_info.api_columns[api_id];
                 }
 
@@ -176,6 +190,13 @@ boost::asio::awaitable<void> engine::handle_api_msg(asio::io_context& io_context
                 }
             }
             else{
+                std::filesystem::create_directories(failed_log_path/ lawd_cd);
+                std::ofstream failed_log(failed_file_path,std::ios::app);
+                time_t timer = time(NULL);
+                tm* t = localtime(&timer);
+                failed_log << t->tm_mon << "-" << t->tm_mday << " / " << t->tm_hour << ":" << t->tm_min << ":" << t->tm_sec << "\n";
+                failed_log << res.result() << "\n";
+                failed_log << res.body() << "\n";
                 retry++;
                 continue;
             }
@@ -186,6 +207,9 @@ boost::asio::awaitable<void> engine::handle_api_msg(asio::io_context& io_context
 
     // co_await asio::steady_timer(co_await asio::this_coro::executor, std::chrono::milliseconds(1)).async_wait(asio::use_awaitable);
     
+    if(should_msg_free){
+        free(msg);
+    }
     worker_ctx->num_working_tasks--;
     worker_ctx->num_finished_tasks++;
     co_return;
@@ -238,7 +262,6 @@ int engine::worker(int thread_id){
 
 
 void engine::run(){
-    
     asio::thread_pool pool(num_workers);
 
     for (int i = 0;i<num_workers;i++) {
@@ -257,18 +280,6 @@ void engine::run(){
     allocate_work();
 
     pool.join();
-
-    int num_finished = 0;
-    int num_failed = 0;
-    int num_working = 0;
-    for(int i = 0;i<num_workers;i++){
-        num_working += worker_ctx[i].num_working_tasks;
-        num_finished += worker_ctx[i].num_finished_tasks;
-        num_failed += worker_ctx[i].num_failed_tasks;
-    }
-    std::cout << "STILL WORKING(should be 0) : (" << num_working << ")\n";
-    std::cout << "TOTAL Finished : (" << num_finished << ")\n";
-    std::cout << "TOTAL Failed : (" << num_failed << ")\n";
 }
 
 
@@ -392,20 +403,28 @@ void engine::parse_app_args()
 {
     stdcode_filename = ini_ptree.get<std::string>("engine.stdcode_filename","./stdcode_only.bin");
     savepath = ini_ptree.get<std::string>("engine.savepath", "./results/");
+    failed_log_path = ini_ptree.get<std::string>("engine.failed_log_path", "./failed/");
     std::filesystem::create_directories(savepath);
+    std::filesystem::create_directories(failed_log_path);
     num_workers = std::stoi(ini_ptree.get<std::string>("engine.num_thread", "8"));
     worker_max_workload = std::stoi(ini_ptree.get<std::string>("engine.worker_max_workload", "128"));
 
     std::cout << std::string(40, '=') << "\n";
     std::cout << "STDCODE FILENAME : " << stdcode_filename << "\n";
     std::cout << "SAVEPATH : " << savepath << "\n";
+    std::cout << "FAILED_LOG_PATH : " << failed_log_path << "\n";
     std::cout << "NUM THREAD : " << num_workers << "\n";
     std::cout << "WORKER MAX WORKLOAD : " << worker_max_workload << "\n";
     std::cout << std::string(40, '=') << "\n";
 }
 
+void engine::abort(){
+    for(int i = 0;i<num_workers;i++){
+        worker_ctx[i].is_done = true;
+    }
+}
 
-engine::engine(std::string _ini_filename):ini_filename(_ini_filename), submit_done(false){
+engine::engine(std::string _ini_filename):ini_filename(_ini_filename), submit_done(false), total_msgs(0){
     try
     {
         read_ini(ini_filename, ini_ptree);
@@ -434,9 +453,56 @@ engine::engine(std::string _ini_filename):ini_filename(_ini_filename), submit_do
     worker_ctx = (worker_context*)malloc(sizeof(worker_context) * num_workers);
 }
 
+engine::~engine(){
+    std::cout << std::string(10,'-') << "FINISHED" << std::string(10,'-') << "\n";
+
+    int num_finished = 0;
+    int num_failed = 0;
+    int num_noitem= 0;
+    int num_working = 0;
+    std::vector <api_msg*> error_tasks;
+    std::vector <api_msg*> no_items;
+    for(int i = 0;i<num_workers;i++){
+        num_working += worker_ctx[i].num_working_tasks;
+        num_finished += worker_ctx[i].num_finished_tasks;
+        num_noitem += worker_ctx[i].num_noitem_tasks;
+        num_failed += worker_ctx[i].num_failed_tasks;
+        error_tasks.insert(std::end(error_tasks),std::begin(worker_ctx[i].error_tasks),std::end(worker_ctx[i].error_tasks));
+        no_items.insert(std::end(no_items),std::begin(worker_ctx[i].noitem_tasks),std::end(worker_ctx[i].noitem_tasks));
+    }
+    std::cout << "total msg : " << total_msgs << "\n";
+    std::cout << "STILL WORKING(should be 0) : (" << num_working << ")\n";
+    std::cout << "TOTAL Finished : (" << num_finished << ")\n";
+    std::cout << "TOTAL NO ITEM Tasks : (" << num_noitem << ")\n";
+    std::cout << "TOTAL Failed : (" << num_failed << ")\n";
+
+    if(num_failed){
+        std::cout << "make FAILED_TASKS.log" <<"\n";
+        std::ofstream failed_log("./FAILED_TASKS.log",std::ios::app);
+        failed_log << "API\tSTDCD\tT_YM" << "\n";
+        for(auto msg : error_tasks){
+            failed_log << (int)msg->api << "\t" << msg->lawd_cd << "\t" << msg->deal_ymd << "\n";
+            free(msg);
+        }
+    }
+    if(num_noitem){
+        std::cout << "make NOITEM_TASKS.log" <<"\n";
+        std::ofstream failed_log("./NOITME_TASKS.log",std::ios::app);
+        failed_log << "API\tSTDCD\tT_YM" << "\n";
+        for(auto msg : no_items){
+            failed_log << (int)msg->api << "\t" << msg->lawd_cd << "\t" << msg->deal_ymd << "\n";
+            free(msg);
+        }
+    }
+    free(worker_ctx);
+    free(lawd_cd_list);
+    free(year_month_list);
+
+    std::cout << std::string(10,'-') << "FINISHED" << std::string(10,'-') << "\n";
+}
+
 
 int main() {
-    
     engine engine("./estate_parser.ini");
     engine.run();
 

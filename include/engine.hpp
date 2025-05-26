@@ -46,6 +46,7 @@ struct worker_context{
     u_int num_failed_tasks;              // 수행 실패한 task 수
     u_int num_noitem_tasks;             // api 콜에 성공했으나 거래 내용이 없다면
     std::vector<api_msg*> error_tasks;  // 수행 실패한 task의 api_msg pointer
+    std::vector<api_msg*> noitem_tasks;
     
     std::atomic<bool> is_done;
 };
@@ -67,6 +68,7 @@ private:
     bool is_worker_busy(int thread_id);
     bool is_worker_working(worker_context *ctx);
     bool is_worker_working(int thread_id);
+    static void signal_handler(int signum);
     boost::asio::awaitable<void> handle_api_msg(boost::asio::io_context& io_context, worker_context* worker_ctx , api_msg* msg);
     int worker(int thread_id);
     // void consumer();
@@ -74,8 +76,9 @@ private:
 
 public:
     engine(std::string _ini_filename);
-    // ~engine();
     void run();
+    void abort();
+    ~engine();
 
 private:
     ym_t* year_month_list;          // deal_ymd 전체 리스트
@@ -93,6 +96,7 @@ private:
 
     std::string ini_filename;       // ini 파일 이름
     std::filesystem::path savepath;           // 결과 저장 파일 이름
+    std::filesystem::path failed_log_path;
     std::string stdcode_filename;   // 법정동코드(binary) 파일 이름
 
     int num_workers;                // worker thread 수 
@@ -100,6 +104,7 @@ private:
     worker_context* worker_ctx;     // worker thread context
 
     std::atomic<bool> submit_done;  // queue에 더는 푸시할 메세지가 없으며 queue가 비어있음
+    std::atomic<int> total_msgs;
     boost::lockfree::queue<api_msg*, boost::lockfree::capacity<4096>> api_msg_queue;    // api msg queue
 
 public:
