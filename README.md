@@ -21,20 +21,20 @@ api_rent_endpoint = /1613000/RTMSDataSvcAptRent/getRTMSDataSvcAptRent
 api_trade_endpoint = /1613000/RTMSDataSvcAptTrade/getRTMSDataSvcAptTrade
 
 [variable]
-; earliest_ymd = 201101
-earliest_ymd = 201302
-latest_ymd = 201401
-; latest_ymd = 201401
+earliest_ymd = 201101
+; earliest_ymd = 202402
+latest_ymd = 201501
 ; latest_ymd = 202504
 num_of_rows = 1000
 max_retry = 2
-api_rent_columns = aptNm,buildYear,contractTerm,contractType,dealYear,dealMonth,dealDay,deposit,excluUseAr,floor,jibun,monthlyRent,preDeposit,preMonthlyRent,sggCd,umdNm,useRRRight,\n
-api_trade_columns = aptDong,aptNm,buildYear,buyerGbn,cdealDay,cdealType,dealAmount,dealDay,dealMonth,dealYear,dealingGbn,estateAgentSggNm,excluUseAr,floor,jibun,landLeaseholdGbn,rgstDate,sggCd,slerGbn,umdNm,\n
+
+; columns delimiter는 ,로 구분하지만 csv파일에선 \t으로 치환될것임.
+api_rent_columns = aptNm,buildYear,contractTerm,contractType,dealYear,dealMonth,dealDay,deposit,excluUseAr,floor,jibun,monthlyRent,preDeposit,preMonthlyRent,sggCd,umdNm,useRRRight
+api_trade_columns = aptDong,aptNm,buildYear,buyerGbn,cdealDay,cdealType,dealAmount,dealDay,dealMonth,dealYear,dealingGbn,estateAgentSggNm,excluUseAr,floor,jibun,landLeaseholdGbn,rgstDate,sggCd,slerGbn,umdNm
 
 [engine]
-worker_max_workload = 1
-; workload가 많아봤자 공공데이터포털의 초당 최대 트랜잭션이 30tps 제한이기에 1로
-num_thread = 12
+num_thread = 4
+worker_max_workload = 2
 savepath = ./results/
 failed_log_path = ./failed/
 stdcode_filename = ./stdcode_only.bin
