@@ -60,7 +60,7 @@ private:
     void allocate_task(ldcd_t lawd_cd);        // lawd_cd 의 deal_ymd 단위 task producer (msg producer)
     ym_t* generate_year_month_list();       // ini에서 시작~끝 ymd 가져와 list 생성
     ldcd_t* parse_lawd_cd_list();           // binary파일에서 lawd_cd 가져오기
-    std::vector<std::string> tokenizer(std::string org_str, char delim);
+    std::pair<std::string,std::vector<std::string>> tokenizer(std::string org_str, char delim);
     void parse_api_info();
     void parse_app_args();
     void init_worker_ctx(int thread_id);

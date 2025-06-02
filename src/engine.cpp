@@ -134,6 +134,9 @@ boost::asio::awaitable<void> engine::handle_api_msg(asio::io_context& io_context
 
         // send request
         co_await http::async_write(tcp_stream, req, asio::use_awaitable);
+
+        co_await asio::steady_timer(co_await asio::this_coro::executor, std::chrono::milliseconds(50)).async_wait(asio::use_awaitable);
+
         
         // receive response
         co_await http::async_read(tcp_stream,res_buffer,res, asio::use_awaitable);
@@ -169,12 +172,12 @@ boost::asio::awaitable<void> engine::handle_api_msg(asio::io_context& io_context
                         worker_ctx->num_working_tasks--;
                         co_return;
                     }
-                    out << api_info.api_columns[api_id];
+                    out << api_info.api_columns[api_id] << "\n";
                 }
 
                 for (auto& node : pt.get_child("response.body.items")){
                     for(std::string column : api_info.api_column_items[api_id]){
-                        out << node.second.get<std::string>(column,"") << ",";
+                        out << node.second.get<std::string>(column,"") << "\t";
                     }
                     out << "\n";
                 }
@@ -205,7 +208,6 @@ boost::asio::awaitable<void> engine::handle_api_msg(asio::io_context& io_context
 
     out.close();
 
-    // co_await asio::steady_timer(co_await asio::this_coro::executor, std::chrono::milliseconds(1)).async_wait(asio::use_awaitable);
     
     if(should_msg_free){
         free(msg);
@@ -351,14 +353,17 @@ ldcd_t* engine::parse_lawd_cd_list(){
     return ldcd_list;
 }
 
-std::vector<std::string> engine::tokenizer(std::string org_str, char delim){
-    std::vector<std::string> ret;
+std::pair<std::string,std::vector<std::string>> engine::tokenizer(std::string org_str, char delim){
+    std::vector<std::string> ret_vec;
+    std::string ret_str;
     std::string token;
     std::stringstream stream(org_str);
     while(std::getline(stream,token,delim)){
-        ret.push_back(token);
+        ret_vec.push_back(token);
+        ret_str+=token + '\t';
     }
-    return ret;
+
+    return {ret_str,ret_vec};
 }
 
 void engine::parse_api_info()
@@ -385,9 +390,8 @@ void engine::parse_api_info()
     api_info.api_columns[rent_id] = ini_ptree.get<std::string>("variable.api_rent_columns","");
     api_info.api_columns[trade_id] = ini_ptree.get<std::string>("variable.api_trade_columns","");
 
-    api_info.api_column_items[rent_id]=tokenizer(api_info.api_columns[rent_id], ',');    
-    api_info.api_column_items[trade_id]=tokenizer(api_info.api_columns[trade_id],',');
-
+    std::tie(api_info.api_columns[rent_id],api_info.api_column_items[rent_id])=tokenizer(api_info.api_columns[rent_id], ',');    
+    std::tie(api_info.api_columns[trade_id],api_info.api_column_items[trade_id])=tokenizer(api_info.api_columns[trade_id],',');
 
     num_of_rows = std::stoi(ini_ptree.get<std::string>("variable.num_of_rows", "1000"));
     max_retry = std::stoi(ini_ptree.get<std::string>("variable.max_retry", "3"));
@@ -397,6 +401,8 @@ void engine::parse_api_info()
     std::cout << "ENDPOINT(TRADE) : " << trade_addr << "\n";
     std::cout << "API_KEY (RENT) : " << rent_key << "\n";
     std::cout << "API_KEY (TRADE) : " << trade_key << "\n";
+    std::cout << "RENT_COLUMN : " << api_info.api_columns[rent_id] << ".\n";
+    std::cout << "TRADE_COLUMN : " << api_info.api_columns[trade_id] << ".\n";
 }
 
 void engine::parse_app_args()
